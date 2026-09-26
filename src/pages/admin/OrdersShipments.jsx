@@ -1,0 +1,19 @@
+import { useMemo, useState } from 'react'
+import { ClipboardList, Search, Truck, Eye } from 'lucide-react'
+import { useWarex } from '../../context/WarexContext'
+import StatusPill from '../../components/common/StatusPill'
+
+export default function OrdersShipments() {
+  const { orders, shipments, users, assignShipment, updateShipment } = useWarex()
+  const [query, setQuery] = useState('')
+  const deliveries = users.filter((u) => u.roleId === 'delivery_partner' && u.active)
+  const filtered = useMemo(() => orders.filter((o) => `${o.id} ${o.customerName} ${o.status}`.toLowerCase().includes(query.toLowerCase())), [orders, query])
+  const meta = { Placed: ['Placed','amber'], Confirmed: ['Confirmed','green'], Reserved: ['Stock Reserved','green'], Picked: ['Picked','neutral'], Packed: ['Packed','green'], 'Shipment Created': ['Shipment Created','amber'], 'Out for Delivery': ['Out for Delivery','amber'], Delivered: ['Delivered','green'], Closed: ['Closed','neutral'], Delayed: ['Delayed','red'] }
+
+  return <div>
+    <div className="flex items-center gap-2"><ClipboardList size={18} style={{ color: 'var(--accent-dim)' }} /><h1 className="text-xl font-semibold" style={{ color: 'var(--text)' }}>Orders & Shipments</h1></div>
+    <p className="mt-1 text-sm" style={{ color: 'var(--muted)' }}>Admin view of the full WAREX order lifecycle and delivery assignment.</p>
+    <div className="mt-4 relative max-w-md"><Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: 'var(--muted)' }} /><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search order, customer or status…" className="w-full pl-9 pr-3 py-2 text-sm rounded-md outline-none" style={{ background: 'var(--paper-panel)', border: '1px solid var(--paper-line)', color: 'var(--text)' }} /></div>
+    <div className="mt-4 rounded-lg overflow-hidden" style={{ background: 'var(--paper-panel)', border: '1px solid var(--paper-line)' }}><div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr style={{ borderBottom: '1px solid var(--paper-line)' }}>{['Order','Customer','Items','Value','Status','Shipment','Action'].map((h) => <th key={h} className="text-left px-4 py-2.5 text-xs font-medium" style={{ color: 'var(--muted)' }}>{h}</th>)}</tr></thead><tbody>{filtered.map((o) => { const m = meta[o.status] || [o.status,'neutral']; const sh = shipments.find((s) => s.id === o.shipmentId); return <tr key={o.id} style={{ borderBottom: '1px solid var(--paper-line)' }}><td className="px-4 py-3 font-mono-data text-xs" style={{ color: 'var(--text)' }}>{o.id}</td><td className="px-4 py-3" style={{ color: 'var(--text)' }}>{o.customerName}</td><td className="px-4 py-3 text-xs" style={{ color: 'var(--muted)' }}>{o.items.reduce((s, i) => s + i.qty, 0)} units</td><td className="px-4 py-3 font-mono-data" style={{ color: 'var(--text)' }}>₹{o.total.toLocaleString('en-IN')}</td><td className="px-4 py-3"><StatusPill label={m[0]} variant={m[1]} /></td><td className="px-4 py-3 text-xs" style={{ color: 'var(--muted)' }}>{sh ? `${sh.id} · ${sh.status}` : '—'}</td><td className="px-4 py-3">{sh && <div className="flex gap-2">{!sh.deliveryEmail && <select defaultValue="" onChange={(e) => { const user = deliveries.find((u) => u.email === e.target.value); if (user) assignShipment(sh.id, user) }} className="px-2 py-1.5 text-xs rounded-md outline-none" style={{ background: 'var(--paper)', border: '1px solid var(--paper-line)', color: 'var(--text)' }}><option value="">Assign driver</option>{deliveries.map((d) => <option key={d.id} value={d.email}>{d.name}</option>)}</select>}{sh.status !== 'Delivered' && <button onClick={() => updateShipment(sh.id, 'Delivered')} className="inline-flex items-center gap-1 px-2 py-1.5 text-xs rounded-md" style={{ background: 'var(--ink)', color: '#fff' }}><Truck size={12} /> Demo deliver</button>}</div>}</td></tr> })}</tbody></table></div></div>
+  </div>
+}

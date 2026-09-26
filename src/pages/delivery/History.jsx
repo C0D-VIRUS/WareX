@@ -1,0 +1,8 @@
+import { History, CheckCircle2 } from 'lucide-react'
+import { useWarex } from '../../context/WarexContext'
+
+export default function HistoryPage({ session }) {
+  const { shipments } = useWarex()
+  const mine = shipments.filter((s) => s.deliveryEmail === session.email && s.status === 'Delivered')
+  return <div><div className="flex items-center gap-2"><History size={18} style={{ color: 'var(--accent-dim)' }} /><h1 className="text-xl font-semibold" style={{ color: 'var(--text)' }}>Shipment History</h1></div><p className="mt-1 text-sm" style={{ color: 'var(--muted)' }}>Completed deliveries and proof-of-delivery status.</p><div className="mt-5 rounded-lg overflow-hidden" style={{ background: 'var(--paper-panel)', border: '1px solid var(--paper-line)' }}><table className="w-full text-sm"><thead><tr style={{ borderBottom: '1px solid var(--paper-line)' }}>{['Shipment','Order','Customer','ETA','Proof'].map((h) => <th key={h} className="text-left px-4 py-2.5 text-xs font-medium" style={{ color: 'var(--muted)' }}>{h}</th>)}</tr></thead><tbody>{mine.map((s) => <tr key={s.id} style={{ borderBottom: '1px solid var(--paper-line)' }}><td className="px-4 py-3 font-mono-data text-xs" style={{ color: 'var(--text)' }}>{s.id}</td><td className="px-4 py-3 font-mono-data text-xs" style={{ color: 'var(--muted)' }}>{s.orderId}</td><td className="px-4 py-3" style={{ color: 'var(--text)' }}>{s.customerName}</td><td className="px-4 py-3 text-xs" style={{ color: 'var(--muted)' }}>{s.eta}</td><td className="px-4 py-3"><span className="inline-flex items-center gap-1 text-xs" style={{ color: 'var(--signal-green)' }}><CheckCircle2 size={13} /> Captured</span></td></tr>)}</tbody></table></div></div>
+}
