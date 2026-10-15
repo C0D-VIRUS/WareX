@@ -17,21 +17,28 @@ function RackMotif() {
 }
 
 export default function LoginPage() {
-  const { users, login, pushToast } = useWarex()
+  const { login, pushToast } = useWarex()
   const [email, setEmail] = useState('admin@warex.com')
   const [password, setPassword] = useState('admin123')
   const [showPassword, setShowPassword] = useState(false)
   const [error, setError] = useState('')
-  const demoUsers = useMemo(() => users.filter((u) => u.active).slice(0, 6), [users])
+  const demoUsers = useMemo(() => ([
+    { id: 'demo-admin', name: 'WAREX Main Admin', email: 'admin@warex.com', password: 'admin123', roleId: 'admin' },
+    { id: 'demo-manufacturer', name: 'Hero Electronics', email: 'manufacturer@warex.com', password: 'demo123', roleId: 'manufacturer' },
+    { id: 'demo-warehouse', name: 'Pune Warehouse', email: 'warehouse@warex.com', password: 'demo123', roleId: 'warehouse_manager' },
+    { id: 'demo-delivery', name: 'Fleet Partner One', email: 'delivery@warex.com', password: 'demo123', roleId: 'delivery_partner' },
+    { id: 'demo-customer', name: 'Sharma Electronics', email: 'customer@warex.com', password: 'demo123', roleId: 'business_customer' },
+    { id: 'demo-technician', name: 'Service Technician', email: 'technician@warex.com', password: 'demo123', roleId: 'technician' },
+  ]), [])
 
-  function handleSubmit(e) {
+  async function handleSubmit(e) {
     e.preventDefault()
     setError('')
     if (!email.trim() || !password) {
       setError('Email and password are required.')
       return
     }
-    const result = login(email, password)
+    const result = await login(email, password)
     if (!result.ok) setError(result.error)
   }
 
@@ -96,7 +103,7 @@ export default function LoginPage() {
             </div>
           </div>
 
-          <p className="mt-5 text-[11px] leading-relaxed" style={{ color: 'var(--muted)' }}>Frontend demo note: credentials are stored locally for this prototype. In the backend phase, authentication and password storage will move to the server.</p>
+          <p className="mt-5 text-[11px] leading-relaxed" style={{ color: 'var(--muted)' }}>Login and account status are verified by the WAREX backend. Demo shortcuts work only for accounts present in your database.</p>
         </div>
       </div>
     </div>

@@ -4,7 +4,8 @@ import AppShell from './components/layout/AppShell'
 import { WarexProvider, useWarex } from './context/WarexContext'
 
 function AppRoutes() {
-  const { session } = useWarex()
+  const { session, authLoading } = useWarex()
+  if (authLoading) return <div className="min-h-screen flex items-center justify-center text-sm" style={{ background: 'var(--paper)', color: 'var(--muted)' }}>Verifying WAREX session…</div>
   return (
     <Routes>
       <Route path="/" element={session ? <Navigate to={`/${session.roleId}`} replace /> : <LoginPage />} />

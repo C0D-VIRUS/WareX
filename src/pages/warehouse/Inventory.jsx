@@ -18,7 +18,7 @@ const REASONS = ['Damage', 'Loss', 'Correction', 'Other']
 
 function statusFor(item) {
   if (item.available === 0) return { label: 'Out of stock', variant: 'red' }
-  if (item.available <= item.reorder) return { label: 'Low stock', variant: 'amber' }
+  if (item.reorder > 0 && item.available <= item.reorder) return { label: 'Low stock', variant: 'amber' }
   return { label: 'In stock', variant: 'green' }
 }
 
@@ -163,10 +163,11 @@ export default function Inventory() {
     )
   }, [inventory, query])
 
-  const lowStockCount = inventory.filter((i) => i.available <= i.reorder).length
+  const lowStockCount = inventory.filter((i) => i.reorder > 0 && i.available <= i.reorder).length
 
-  function handleAdjustConfirm({ delta, reason, note }) {
-    adjustInventory(adjusting.sku, delta)
+  async function handleAdjustConfirm({ delta, reason, note }) {
+    const saved = await adjustInventory(adjusting.sku, delta, { reason, note })
+    if (!saved) return
     setHistory((prev) => [
       { sku: adjusting.sku, delta, reason, note, at: new Date().toLocaleString() },
       ...prev,

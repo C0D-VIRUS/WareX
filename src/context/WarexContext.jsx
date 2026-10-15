@@ -1,7 +1,9 @@
-import { createContext, useCallback, useContext, useMemo, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { apiRequest, toSessionUser } from '../lib/api'
 
 const STORAGE_KEY = 'warex-state-v2'
 const SESSION_KEY = 'warex-session-v2'
+const TOKEN_KEY = 'warex-auth-token'
 
 const seed = {
   users: [
@@ -55,6 +57,11 @@ const seed = {
   serviceVisits: [
     { id: 'SV-2026-0021', complaintId: 'CMP-2026-0042', customerName: 'Sharma Electronics', technicianEmail: 'technician@warex.com', orderId: 'ORD-2026-1032', status: 'Assigned', assemblyRequired: true, defectFound: false, report: '' },
   ],
+  vehicles: [],
+  deliveryRuns: [],
+  transfers: [],
+  sellThrough: [],
+  returns: [],
   notifications: [
     { id: 'N-1', target: 'admin', message: 'New bulk order ORD-2026-1042 requires warehouse processing.', read: false, createdAt: '2026-09-26 10:16' },
     { id: 'N-2', target: 'warehouse_manager', message: 'Restock RST-2026-0148 is awaiting receipt.', read: false, createdAt: '2026-09-26 11:26' },
@@ -62,271 +69,770 @@ const seed = {
   ],
 }
 
+
 const WarexContext = createContext(null)
 
-function readStorage() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY)
-    return raw ? JSON.parse(raw) : seed
-  } catch {
-    return seed
+function makeId(prefix) { return `${prefix}-${Date.now().toString().slice(-8)}` }
+function fmtDate(value) { return value ? new Date(value).toLocaleString() : '—' }
+function number(value) { return Number(value ?? 0) }
+function readSession() {
+  try { const raw = sessionStorage.getItem(SESSION_KEY); return raw ? JSON.parse(raw) : null } catch { return null }
+}
+function statusLabel(value, map) { return map[value] || value || 'Unknown' }
+
+function mapUser(user) {
+  return {
+    id: user.id,
+    name: user.fullName || user.name,
+    email: user.email,
+    roleId: user.roleId || user.role?.id,
+    roleName: user.roleName || user.role?.name,
+    active: (user.status || 'ACTIVE') === 'ACTIVE',
+    isMainAdmin: Boolean(user.isMainAdmin),
+    createdAt: user.createdAt ? new Date(user.createdAt).toLocaleDateString() : '',
+  }
+}
+function mapProduct(product) {
+  return {
+    id: product.id,
+    dbId: product.id,
+    code: product.sku,
+    name: product.name,
+    category: product.category,
+    price: number(product.unitPrice),
+    cartonSize: number(product.cartonSize || 1),
+    reorder: number(product.reorderThreshold),
+    assembly: Boolean(product.requiresAssembly),
+    active: Boolean(product.isActive),
+  }
+}
+function mapInventory(item) {
+  return {
+    id: item.id,
+    dbId: item.id,
+    warehouseId: item.warehouseId,
+    skuId: item.skuId,
+    sku: item.sku?.sku || item.skuId,
+    name: item.sku?.name || 'Unknown product',
+    bin: item.rackBin?.locationCode || item.warehouse?.name || 'UNASSIGNED',
+    warehouse: item.warehouse?.name || 'Warehouse',
+    available: number(item.quantity),
+    reserved: number(item.reserved),
+    incoming: number(item.incoming),
+    reorder: number(item.sku?.reorderThreshold),
+  }
+}
+function mapOrder(order) {
+  const status = statusLabel(order.status, { PLACED: 'Placed', CONFIRMED: 'Confirmed', RESERVED: 'Reserved', DELAYED: 'Delayed', PICKING: 'Picked', PACKED: 'Packed', PROCESSED: 'Shipment Created', SHIPPED: 'Out for Delivery', DELIVERED: 'Delivered', CLOSED: 'Closed' })
+  return {
+    id: order.orderNumber,
+    dbId: order.id,
+    customerEmail: order.customer?.email || '',
+    customerName: order.customer?.fullName || 'Business Customer',
+    items: (order.items || []).map((item) => ({ sku: item.sku?.sku || item.skuId, skuId: item.skuId, name: item.sku?.name || 'Product', qty: number(item.quantity), price: number(item.unitPrice) })),
+    total: number(order.totalAmount),
+    status,
+    warehouse: order.warehouse?.name || 'WAREX Warehouse',
+    warehouseId: order.warehouseId,
+    createdAt: fmtDate(order.createdAt || order.orderDate),
+    shipmentId: order.shipment?.shipmentNumber || null,
+  }
+}
+function mapShipment(shipment) {
+  const statuses = { CREATED: 'Created', ASSIGNED: 'Assigned', IN_TRANSIT: 'Out for delivery', DELIVERED: 'Delivered', CLOSED: 'Closed' }
+  return {
+    id: shipment.shipmentNumber,
+    dbId: shipment.id,
+    orderId: shipment.order?.orderNumber || '',
+    orderDbId: shipment.orderId,
+    customerName: shipment.order?.customer?.fullName || 'Business Customer',
+    deliveryEmail: shipment.deliveryPartner?.email || '',
+    deliveryName: shipment.deliveryPartner?.fullName || '',
+    deliveryPartnerId: shipment.deliveryPartnerId,
+    status: statusLabel(shipment.status, statuses),
+    eta: shipment.eta ? fmtDate(shipment.eta) : 'To be scheduled',
+    proof: Boolean(shipment.proofOfDelivery),
+    trackingNumber: shipment.trackingNumber,
+  }
+}
+function mapRestock(item) {
+  const first = item.items?.[0]
+  return {
+    id: item.restockId,
+    dbId: item.id,
+    itemId: first?.id,
+    manufacturerEmail: item.dealer?.email || '',
+    manufacturer: item.dealer?.fullName || 'Dealer / Manufacturer',
+    sku: first?.sku?.sku || '',
+    skuId: first?.skuId,
+    qty: number(first?.quantity),
+    docs: item.documentReference || '—',
+    status: statusLabel(item.status, { SUBMITTED: 'Submitted', VALIDATED: 'Validated', REJECTED: 'Rejected', RECEIVED: 'Received', ACCEPTED: 'Received' }),
+    warehouse: item.destination?.name || 'WAREX Warehouse',
+    warehouseId: item.destinationId,
+    createdAt: fmtDate(item.createdAt),
+  }
+}
+function mapComplaint(item) {
+  const status = statusLabel(item.status, { OPEN: 'Open', ASSIGNED: 'Service Assigned', IN_PROGRESS: 'In Progress', RESOLVED: 'Resolved', CLOSED: 'Closed' })
+  return {
+    id: item.complaintId,
+    dbId: item.id,
+    orderId: item.order?.orderNumber || '',
+    orderDbId: item.orderId,
+    customerEmail: item.customer?.email || '',
+    customerName: item.customer?.fullName || '',
+    subject: item.complaintType,
+    description: item.description,
+    priority: item.priority,
+    status,
+    assignedTo: item.serviceVisit?.technician?.email || '',
+    createdAt: fmtDate(item.createdAt),
+  }
+}
+function mapServiceVisit(item) {
+  const statuses = { ASSIGNED: 'Assigned', VISIT_ACCEPTED: 'Visit Accepted', INSPECTED: 'Inspected', ASSEMBLY_COMPLETED: 'Assembly Completed', DEFECT_FOUND: 'Defect Found', REPAIR_COMPLETED: 'Repair Completed', COMPLETED: 'Completed' }
+  return {
+    id: item.visitId,
+    dbId: item.id,
+    complaintId: item.complaint?.complaintId || '',
+    complaintDbId: item.complaintId,
+    customerName: item.complaint?.customer?.fullName || 'Business Customer',
+    technicianEmail: item.technician?.email || '',
+    orderId: item.complaint?.order?.orderNumber || '',
+    status: statusLabel(item.status, statuses),
+    assemblyRequired: Boolean(item.assemblyRequired),
+    defectFound: Boolean(item.defectFound),
+    report: item.notes || '',
+  }
+}
+function mapNotification(item, session) {
+  return { id: item.notificationId, dbId: item.id, target: session?.roleId, targetEmail: session?.email, message: item.message, read: Boolean(item.readStatus), createdAt: fmtDate(item.createdAt) }
+}
+function mapReturn(item) {
+  return { id: item.returnId, dbId: item.id, order: item.order?.orderNumber || '', orderDbId: item.orderId, sku: item.sku?.sku || 'All items', skuId: item.skuId || '', reason: item.reason, status: statusLabel(item.status, { REQUESTED: 'Open', APPROVED: 'Approved', REJECTED: 'Rejected', RECEIVED: 'Received', COMPLETED: 'Closed' }), customerEmail: item.customer?.email || '', createdAt: fmtDate(item.createdAt) }
+}
+function mapTransfer(item) {
+  return {
+    id: item.transferId,
+    dbId: item.id,
+    from: item.fromWarehouse?.name || 'Unknown warehouse',
+    to: item.toWarehouse?.name || 'Unknown warehouse',
+    fromWarehouseId: item.fromWarehouseId,
+    toWarehouseId: item.toWarehouseId,
+    fromManagerId: item.fromWarehouse?.managerId || null,
+    toManagerId: item.toWarehouse?.managerId || null,
+    status: statusLabel(item.status, { REQUESTED: 'Requested', IN_TRANSIT: 'In transit', RECEIVED: 'Received', CANCELLED: 'Cancelled' }),
+    items: (item.items || []).map((line) => ({ sku: line.sku?.sku || line.skuId, skuId: line.skuId, name: line.sku?.name || 'Product', qty: number(line.quantity), receivedQty: number(line.receivedQuantity) })),
+    createdAt: fmtDate(item.createdAt),
   }
 }
 
-function makeId(prefix) {
-  return `${prefix}-${Date.now().toString().slice(-8)}`
+async function fetchBackendState(session) {
+  const roleId = session.roleId
+  const usersPath = session.isMainAdmin ? '/users' : '/catalog/team'
+  const canSeeInventory = ['admin', 'warehouse_manager'].includes(roleId)
+  const canSeeOrders = ['admin', 'warehouse_manager', 'business_customer'].includes(roleId)
+  const canSeeShipments = ['admin', 'warehouse_manager', 'delivery_partner', 'business_customer'].includes(roleId)
+  const canSeeComplaints = ['admin', 'business_customer'].includes(roleId)
+  const canSeeServiceVisits = ['admin', 'technician'].includes(roleId)
+  const canSeeReturns = ['admin', 'warehouse_manager', 'business_customer'].includes(roleId)
+  const canSeeRestocks = ['admin', 'warehouse_manager', 'manufacturer'].includes(roleId)
+  const canSeeFleet = ['admin', 'warehouse_manager', 'delivery_partner'].includes(roleId)
+  const canSeeTransfers = ['admin', 'warehouse_manager'].includes(roleId)
+  const canSeeSellThrough = ['admin', 'manufacturer'].includes(roleId)
+
+  const [products, warehouses, inventory, orders, shipments, restocks, complaints, visits, notifications, users, returns, vehicles, deliveryRuns, transfers, sellThrough] = await Promise.all([
+    apiRequest('/catalog/products?includeInactive=true'),
+    apiRequest('/catalog/warehouses'),
+    canSeeInventory ? apiRequest('/catalog/inventory') : Promise.resolve([]),
+    canSeeOrders ? apiRequest('/orders') : Promise.resolve([]),
+    canSeeShipments ? apiRequest('/shipments') : Promise.resolve([]),
+    canSeeRestocks ? apiRequest('/restocks') : Promise.resolve([]),
+    canSeeComplaints ? apiRequest('/complaints') : Promise.resolve([]),
+    canSeeServiceVisits ? apiRequest('/service-visits') : Promise.resolve([]),
+    apiRequest('/notifications'),
+    apiRequest(usersPath),
+    canSeeReturns ? apiRequest('/returns') : Promise.resolve([]),
+    canSeeFleet ? apiRequest('/fleet/vehicles') : Promise.resolve([]),
+    canSeeFleet ? apiRequest('/fleet/runs') : Promise.resolve([]),
+    canSeeTransfers ? apiRequest('/transfers') : Promise.resolve([]),
+    canSeeSellThrough ? apiRequest('/catalog/sell-through') : Promise.resolve([]),
+  ])
+  const mappedWarehouses = warehouses.map((item) => ({ id: item.id, dbId: item.id, name: item.name, city: item.city, address: item.address || '', capacity: number(item.capacity), occupancy: 0, active: item.status === 'ACTIVE', manager: item.manager?.fullName || 'Unassigned', managerId: item.managerId }))
+  return {
+    products: products.map(mapProduct),
+    warehouses: mappedWarehouses,
+    inventory: inventory.map(mapInventory),
+    orders: orders.map(mapOrder),
+    shipments: shipments.map(mapShipment),
+    restocks: restocks.map(mapRestock),
+    complaints: complaints.map(mapComplaint),
+    serviceVisits: visits.map(mapServiceVisit),
+    notifications: notifications.map((item) => mapNotification(item, session)),
+    users: users.map(mapUser),
+    returns: returns.map(mapReturn),
+    vehicles: vehicles.map((vehicle) => ({ ...vehicle, id: vehicle.id, dbId: vehicle.id, reg: vehicle.registrationNo, statusLabel: ({ AVAILABLE: 'Available', IN_USE: 'In use', MAINTENANCE: 'Maintenance' })[vehicle.status] || vehicle.status })),
+    deliveryRuns: deliveryRuns.map((run) => ({ ...run, id: run.runId, dbId: run.id, vehicleRegistration: run.vehicle?.registrationNo || 'Unassigned', driverName: run.deliveryPartner?.fullName || 'Unassigned' })),
+    transfers: transfers.map(mapTransfer),
+    sellThrough: sellThrough.map((item) => ({ ...item, unitPrice: number(item.unitPrice), unitsSold: number(item.unitsSold), revenue: number(item.revenue), orderCount: number(item.orderCount) })),
+  }
 }
 
-export function WarexProvider({ children }) {
-  const [state, setState] = useState(readStorage)
-  const [session, setSessionState] = useState(() => {
-    try {
-      const raw = sessionStorage.getItem(SESSION_KEY)
-      return raw ? JSON.parse(raw) : null
-    } catch {
-      return null
-    }
-  })
-  const [toast, setToast] = useState(null)
+function roleLabel(roleId) {
+  return ({ admin: 'Main Admin', warehouse_manager: 'Warehouse Manager', delivery_partner: 'Delivery Partner', business_customer: 'Business Customer', manufacturer: 'Dealer / Manufacturer', technician: 'Technician' })[roleId] || roleId || 'assigned recipient'
+}
+function findByDisplayId(rows, value) { return rows.find((row) => row.id === value || row.dbId === value) }
 
-  const persist = useCallback((updater) => {
-    setState((current) => {
-      const next = typeof updater === 'function' ? updater(current) : updater
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(next))
-      return next
-    })
-  }, [])
+export function WarexProvider({ children }) {
+  const [state, setState] = useState(() => {
+    try { const raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) : seed } catch { return seed }
+  })
+  const [session, setSessionState] = useState(readSession)
+  const [authLoading, setAuthLoading] = useState(() => Boolean(sessionStorage.getItem(TOKEN_KEY)))
+  const [dataLoading, setDataLoading] = useState(false)
+  const [toast, setToast] = useState(null)
 
   const pushToast = useCallback((message, type = 'success') => {
     setToast({ id: Date.now(), message, type })
-    window.setTimeout(() => setToast(null), 2800)
+    window.setTimeout(() => setToast((current) => current?.message === message ? null : current), 3600)
   }, [])
 
-  const login = useCallback((email, password) => {
-    const user = state.users.find((u) => u.email.toLowerCase() === email.trim().toLowerCase() && u.password === password)
-    if (!user) return { ok: false, error: 'Invalid email or password.' }
-    if (!user.active) return { ok: false, error: 'This account is inactive. Contact the Main Admin.' }
-    const next = { userId: user.id, roleId: user.roleId, email: user.email, name: user.name }
-    sessionStorage.setItem(SESSION_KEY, JSON.stringify(next))
-    setSessionState(next)
-    pushToast(`Welcome back, ${user.name}.`)
-    return { ok: true, session: next }
-  }, [state.users, pushToast])
+  const refreshData = useCallback(async (activeSession = session) => {
+    if (!activeSession || !sessionStorage.getItem(TOKEN_KEY)) return false
+    setDataLoading(true)
+    try {
+      const fresh = await fetchBackendState(activeSession)
+      setState((current) => {
+        const next = { ...current, ...fresh }
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(next)) } catch { /* Database remains source of truth. */ }
+        return next
+      })
+      return true
+    } finally {
+      setDataLoading(false)
+    }
+  }, [session])
+
+  useEffect(() => {
+    const token = sessionStorage.getItem(TOKEN_KEY)
+    if (!token) { setSessionState(null); setAuthLoading(false); return }
+    let cancelled = false
+    ;(async () => {
+      let restored
+      try {
+        const user = await apiRequest('/auth/me')
+        restored = toSessionUser(user)
+        if (cancelled) return
+        sessionStorage.setItem(SESSION_KEY, JSON.stringify(restored))
+        setSessionState(restored)
+      } catch (error) {
+        if (!cancelled) {
+          sessionStorage.removeItem(TOKEN_KEY)
+          sessionStorage.removeItem(SESSION_KEY)
+          setSessionState(null)
+          setToast({ id: Date.now(), message: `Your session could not be verified: ${error.message}`, type: 'error' })
+        }
+        return
+      } finally {
+        if (!cancelled) setAuthLoading(false)
+      }
+      // Keep a valid login if a non-auth data endpoint is temporarily unavailable.
+      try {
+        const fresh = await fetchBackendState(restored)
+        if (!cancelled) setState((current) => ({ ...current, ...fresh }))
+      } catch (error) {
+        if (!cancelled) setToast({ id: Date.now(), message: `Signed in, but some live data could not load: ${error.message}. Use Refresh to try again.`, type: 'error' })
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  const login = useCallback(async (email, password) => {
+    try {
+      const result = await apiRequest('/auth/login', { method: 'POST', body: JSON.stringify({ email: email.trim(), password }) })
+      if (!result?.token || !result?.user) return { ok: false, error: 'The WAREX API returned an incomplete login response.' }
+      sessionStorage.setItem(TOKEN_KEY, result.token)
+      const next = toSessionUser(result.user)
+      sessionStorage.setItem(SESSION_KEY, JSON.stringify(next))
+      setSessionState(next)
+      try {
+        const fresh = await fetchBackendState(next)
+        setState((current) => ({ ...current, ...fresh }))
+      } catch (error) {
+        pushToast(`Signed in, but live data did not load: ${error.message}`, 'error')
+      }
+      pushToast(`Welcome back, ${next.name}.`)
+      return { ok: true, session: next }
+    } catch (error) { return { ok: false, error: error.message || 'Unable to sign in.' } }
+  }, [pushToast])
 
   const logout = useCallback(() => {
+    sessionStorage.removeItem(TOKEN_KEY)
     sessionStorage.removeItem(SESSION_KEY)
     setSessionState(null)
-  }, [])
+    pushToast('You have signed out.')
+  }, [pushToast])
 
-  const createUser = useCallback((data) => {
-    const email = data.email.trim().toLowerCase()
-    if (state.users.some((u) => u.email.toLowerCase() === email)) {
-      return { ok: false, error: 'A user with this email already exists.' }
+  const createUser = useCallback(async (data) => {
+    try {
+      const result = await apiRequest('/users', { method: 'POST', body: JSON.stringify({ fullName: data.name, email: data.email, password: data.password || 'welcome123', roleId: data.roleId }) })
+      await refreshData()
+      const user = mapUser(result)
+      pushToast(`User ${user.name} created and assigned the ${roleLabel(user.roleId)} role.`)
+      return { ok: true, user }
+    } catch (error) { pushToast(`Could not create user: ${error.message}`, 'error'); return { ok: false, error: error.message } }
+  }, [pushToast, refreshData])
+
+  const updateUser = useCallback(async (id, patch) => {
+    const existing = findByDisplayId(state.users, id)
+    try {
+      if (!existing) throw new Error('User not found in the current data.')
+      await apiRequest(`/users/${existing.dbId || existing.id}`, { method: 'PATCH', body: JSON.stringify({ ...(patch.name !== undefined ? { fullName: patch.name } : {}), ...(patch.roleId !== undefined ? { roleId: patch.roleId } : {}), ...(patch.active !== undefined ? { status: patch.active ? 'ACTIVE' : 'INACTIVE' } : {}) }) })
+      await refreshData()
+      pushToast('User details saved to the WAREX database.')
+      return true
+    } catch (error) { pushToast(`Could not update user: ${error.message}`, 'error'); return false }
+  }, [state.users, pushToast, refreshData])
+
+  const toggleUser = useCallback(async (id) => {
+    const user = findByDisplayId(state.users, id)
+    if (!user) { pushToast('User not found.', 'error'); return false }
+    return updateUser(id, { active: !user.active })
+  }, [state.users, updateUser, pushToast])
+
+  const createProduct = useCallback(async (data) => {
+    try {
+      const product = await apiRequest('/catalog/products', { method: 'POST', body: JSON.stringify({ sku: data.code.trim().toUpperCase(), name: data.name.trim(), category: data.category, unitPrice: Number(data.price || 0), cartonSize: Number(data.cartonSize || 1), requiresAssembly: Boolean(data.assembly), reorderThreshold: Number(data.reorder || 0) }) })
+      await refreshData()
+      pushToast(`${product.sku} added to the database. Initial inventory records were created for active warehouses.`)
+      return mapProduct(product)
+    } catch (error) { pushToast(`Could not add product: ${error.message}`, 'error'); return null }
+  }, [refreshData, pushToast])
+
+  const updateProduct = useCallback(async (code, patch) => {
+    const product = state.products.find((item) => item.code === code)
+    if (!product) { pushToast(`SKU ${code} was not found.`, 'error'); return false }
+    try {
+      await apiRequest(`/catalog/products/${product.dbId || product.id}`, { method: 'PATCH', body: JSON.stringify({ ...(patch.name !== undefined ? { name: patch.name } : {}), ...(patch.category !== undefined ? { category: patch.category } : {}), ...(patch.price !== undefined ? { unitPrice: Number(patch.price) } : {}), ...(patch.cartonSize !== undefined ? { cartonSize: Number(patch.cartonSize) } : {}), ...(patch.reorder !== undefined ? { reorderThreshold: Number(patch.reorder) } : {}), ...(patch.assembly !== undefined ? { requiresAssembly: Boolean(patch.assembly) } : {}), ...(patch.active !== undefined ? { isActive: Boolean(patch.active) } : {}) }) })
+      await refreshData()
+      pushToast(`SKU ${code} updated in the database.`)
+      return true
+    } catch (error) { pushToast(`Could not update SKU: ${error.message}`, 'error'); return false }
+  }, [state.products, refreshData, pushToast])
+
+  const toggleProduct = useCallback(async (code) => {
+    const product = state.products.find((item) => item.code === code)
+    if (!product) { pushToast(`SKU ${code} was not found.`, 'error'); return false }
+    return updateProduct(code, { active: !product.active })
+  }, [state.products, updateProduct, pushToast])
+
+  const adjustInventory = useCallback(async (sku, delta, metadata = {}) => {
+    const item = state.inventory.find((row) => row.sku === sku)
+    if (!item) { pushToast(`No inventory record for ${sku} is available to adjust.`, 'error'); return false }
+    try {
+      await apiRequest(`/catalog/inventory/${item.dbId || item.id}/adjust`, { method: 'PATCH', body: JSON.stringify({ delta: Number(delta), reason: metadata.reason, note: metadata.note }) })
+      await refreshData()
+      const newQty = number(item.available) + Number(delta)
+      const threshold = number(item.reorder)
+      if (threshold > 0 && newQty <= threshold) pushToast(`Stock for ${sku} is low (${newQty} left; threshold ${threshold}). Admin and Warehouse Manager have been alerted.`, 'error')
+      else pushToast(`Inventory for ${sku} saved. Available stock: ${newQty}.`)
+      return true
+    } catch (error) { pushToast(`Stock adjustment failed: ${error.message}`, 'error'); return false }
+  }, [state.inventory, refreshData, pushToast])
+
+  const createOrder = useCallback(async (customer, cart) => {
+    try {
+      if (!cart.length) throw new Error('Your cart is empty.')
+      const warehouse = state.warehouses.find((item) => item.active !== false) || state.warehouses[0]
+      if (!warehouse) throw new Error('No active warehouse is available.')
+      const items = cart.map(({ product, qty }) => {
+        const sku = state.products.find((p) => p.code === product.code)
+        if (!sku) throw new Error(`SKU ${product.code} is no longer available.`)
+        return { skuId: sku.dbId || sku.id, quantity: Number(qty) }
+      })
+      const result = await apiRequest('/orders', { method: 'POST', body: JSON.stringify({ warehouseId: warehouse.dbId || warehouse.id, items }) })
+      await refreshData()
+      const recipient = result.routing?.recipientRole || 'Warehouse Manager'
+      const count = result.routing?.recipientCount
+      pushToast(`Request ${result.orderNumber} submitted successfully and routed to ${recipient}${Number.isInteger(count) ? ` (${count} active recipient${count === 1 ? '' : 's'} notified)` : ''}. Their dashboard has been notified.`)
+      return mapOrder(result)
+    } catch (error) { pushToast(`Order request failed: ${error.message}`, 'error'); return null }
+  }, [state.products, state.warehouses, refreshData, pushToast])
+
+  const updateOrder = useCallback(async (orderId, status) => {
+    const order = findByDisplayId(state.orders, orderId)
+    if (!order) { pushToast(`Order ${orderId} was not found.`, 'error'); return false }
+    try {
+      if (status === 'Closed') await apiRequest(`/orders/${order.dbId}/confirm-receipt`, { method: 'POST' })
+      else if (status === 'Confirmed') await apiRequest(`/orders/${order.dbId}/confirm`, { method: 'POST' })
+      else throw new Error(`Unsupported order transition: ${status}`)
+      await refreshData()
+      pushToast(`Order ${order.id} updated to ${status} in the database.`)
+      return true
+    } catch (error) { pushToast(`Could not update order: ${error.message}`, 'error'); return false }
+  }, [state.orders, refreshData, pushToast])
+
+  const reserveStock = useCallback(async (orderId) => {
+    const order = findByDisplayId(state.orders, orderId)
+    if (!order) { pushToast(`Order ${orderId} was not found.`, 'error'); return false }
+    try {
+      await apiRequest(`/orders/${order.dbId}/reserve`, { method: 'POST' })
+      await refreshData()
+      pushToast(`Stock reserved for ${order.id}. Inventory was updated in PostgreSQL.`)
+      return true
+    } catch (error) {
+      try { await refreshData() } catch { /* Show the original operation error. */ }
+      pushToast(error.message || `Could not reserve stock for ${order.id}.`, 'error')
+      return false
     }
-    const user = { id: makeId('U'), name: data.name.trim(), email, password: data.password || 'welcome123', roleId: data.roleId, active: true, createdAt: new Date().toISOString().slice(0, 10) }
-    persist((s) => ({ ...s, users: [...s.users, user] }))
-    pushToast(`User ${user.name} created with ${data.roleId.replaceAll('_', ' ')} role.`)
-    return { ok: true, user }
-  }, [state.users, persist, pushToast])
+  }, [state.orders, refreshData, pushToast])
 
-  const updateUser = useCallback((id, patch) => {
-    persist((s) => ({ ...s, users: s.users.map((u) => u.id === id ? { ...u, ...patch } : u) }))
-    pushToast('User details updated.')
-  }, [persist, pushToast])
+  const pickPackOrder = useCallback(async (orderId, step) => {
+    const order = findByDisplayId(state.orders, orderId)
+    if (!order) { pushToast(`Order ${orderId} was not found.`, 'error'); return false }
+    try {
+      await apiRequest(`/orders/${order.dbId}/${step === 'pick' ? 'pick' : 'pack'}`, { method: 'POST' })
+      await refreshData()
+      pushToast(`${order.id} marked ${step === 'pick' ? 'Picked' : 'Packed'} and saved.`)
+      return true
+    } catch (error) { pushToast(`Could not update pick/pack status: ${error.message}`, 'error'); return false }
+  }, [state.orders, refreshData, pushToast])
 
-  const toggleUser = useCallback((id) => {
-    persist((s) => ({ ...s, users: s.users.map((u) => u.id === id ? { ...u, active: !u.active } : u) }))
-    pushToast('User account status updated.')
-  }, [persist, pushToast])
-
-  const createProduct = useCallback((data) => {
-    const product = { ...data, code: data.code.trim().toUpperCase(), price: Number(data.price || 0), cartonSize: Number(data.cartonSize || 1), reorder: Number(data.reorder || 0), active: data.active !== false }
-    persist((st) => ({ ...st, products: [...st.products, product], inventory: [...st.inventory, { sku: product.code, name: product.name, bin: 'UNASSIGNED', available: 0, reserved: 0, incoming: 0, reorder: product.reorder }] }))
-    pushToast(`${product.code} added to the catalogue.`)
-    return product
-  }, [persist, pushToast])
-
-  const updateProduct = useCallback((code, patch) => {
-    persist((st) => ({ ...st, products: st.products.map((p) => p.code === code ? { ...p, ...patch } : p) }))
-    pushToast('SKU details updated.')
-  }, [persist, pushToast])
-
-  const toggleProduct = useCallback((code) => {
-    persist((st) => ({ ...st, products: st.products.map((p) => p.code === code ? { ...p, active: !p.active } : p) }))
-    pushToast('SKU availability updated.')
-  }, [persist, pushToast])
-
-  const adjustInventory = useCallback((sku, delta) => {
-    persist((st) => ({ ...st, inventory: st.inventory.map((i) => i.sku === sku ? { ...i, available: i.available + Number(delta) } : i) }))
-    pushToast(`Inventory for ${sku} adjusted by ${delta > 0 ? '+' : ''}${delta}.`)
-  }, [persist, pushToast])
-
-  const createOrder = useCallback((customer, cart) => {
-    const items = cart.map(({ product, qty }) => ({ sku: product.code, name: product.name, qty: Number(qty), price: product.price }))
-    const total = items.reduce((sum, item) => sum + item.qty * item.price, 0)
-    const order = { id: makeId('ORD'), customerEmail: customer.email, customerName: customer.name, items, total, status: 'Placed', warehouse: 'Pune Central Warehouse', createdAt: new Date().toLocaleString(), shipmentId: null }
-    persist((s) => ({
-      ...s,
-      orders: [order, ...s.orders],
-      notifications: [{ id: makeId('N'), target: 'warehouse_manager', message: `New bulk order ${order.id} from ${customer.name}.`, read: false, createdAt: new Date().toLocaleString() }, ...s.notifications],
-    }))
-    pushToast(`Bulk order ${order.id} placed successfully.`)
-    return order
-  }, [persist, pushToast])
-
-  const updateOrder = useCallback((orderId, status) => {
-    persist((s) => ({ ...s, orders: s.orders.map((o) => o.id === orderId ? { ...o, status } : o) }))
-    pushToast(`Order ${orderId} moved to ${status}.`)
-  }, [persist, pushToast])
-
-  const reserveStock = useCallback((orderId) => {
-    let available = true
-    persist((s) => {
-      const order = s.orders.find((o) => o.id === orderId)
-      if (!order) return s
-      const enough = order.items.every((item) => {
-        const row = s.inventory.find((i) => i.sku === item.sku)
-        return row && row.available >= item.qty
-      })
-      available = enough
-      if (!enough) {
-        return { ...s, orders: s.orders.map((o) => o.id === orderId ? { ...o, status: 'Delayed' } : o) }
+  const createShipment = useCallback(async (orderId, packageDetails = {}) => {
+    const order = findByDisplayId(state.orders, orderId)
+  
+    if (!order) {
+      pushToast(`Order ${orderId} was not found.`, 'error')
+      return null
+    }
+  
+    const requiredFields = [
+      ['packageWeightKg', 'Package weight'],
+      ['packageLengthCm', 'Package length'],
+      ['packageWidthCm', 'Package width'],
+      ['packageHeightCm', 'Package height'],
+      ['estimatedDistanceKm', 'Estimated delivery distance'],
+    ]
+  
+    const payload = {}
+  
+    for (const [field, label] of requiredFields) {
+      const value = Number(packageDetails[field])
+  
+      if (
+        packageDetails[field] === undefined ||
+        packageDetails[field] === null ||
+        packageDetails[field] === '' ||
+        !Number.isFinite(value) ||
+        value <= 0
+      ) {
+        pushToast(
+          `${label} must be a number greater than zero.`,
+          'error'
+        )
+        return null
       }
-      const nextInventory = s.inventory.map((row) => {
-        const item = order.items.find((i) => i.sku === row.sku)
-        return item ? { ...row, available: row.available - item.qty, reserved: row.reserved + item.qty } : row
-      })
-      return { ...s, inventory: nextInventory, orders: s.orders.map((o) => o.id === orderId ? { ...o, status: 'Reserved' } : o) }
-    })
-    pushToast(available ? `Stock reserved for ${orderId}.` : `Insufficient stock for ${orderId}; order delayed.`, available ? 'success' : 'error')
-    return available
-  }, [persist, pushToast])
-
-  const pickPackOrder = useCallback((orderId, step) => {
-    const status = step === 'pick' ? 'Picked' : 'Packed'
-    persist((s) => ({ ...s, orders: s.orders.map((o) => o.id === orderId ? { ...o, status } : o) }))
-    pushToast(`${orderId} marked ${status}.`)
-  }, [persist, pushToast])
-
-  const createShipment = useCallback((orderId) => {
+  
+      payload[field] = value
+    }
+  
     let shipment
-    persist((s) => {
-      const order = s.orders.find((o) => o.id === orderId)
-      if (!order || order.shipmentId) return s
-      shipment = { id: makeId('SHP'), orderId, customerName: order.customerName, deliveryEmail: '', deliveryName: '', status: 'Created', eta: 'To be scheduled', proof: false }
-      return { ...s, shipments: [shipment, ...s.shipments], orders: s.orders.map((o) => o.id === orderId ? { ...o, status: 'Shipment Created', shipmentId: shipment.id } : o) }
-    })
-    if (shipment) pushToast(`${shipment.id} created for ${orderId}.`)
+  
+    try {
+      shipment = await apiRequest(
+        `/shipments/from-order/${encodeURIComponent(order.dbId || order.id)}`,
+        {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        }
+      )
+    } catch (error) {
+      pushToast(`Could not create shipment: ${error.message}`, 'error')
+      return null
+    }
+  
+    let refreshSucceeded = false
+  
+    try {
+      refreshSucceeded = await refreshData()
+    } catch {
+      refreshSucceeded = false
+    }
+  
+    const shipmentNumber =
+      shipment.shipmentNumber || shipment.id || order.id
+  
+    const recipient =
+      shipment.routing?.recipientRole || 'Delivery Partner'
+  
+    const count = shipment.routing?.recipientCount
+  
+    const vehicle =
+      shipment.vehicleRecommendation ||
+      shipment.deliveryRun?.vehicle
+  
+    const vehicleMessage = vehicle
+      ? ` Selected vehicle: ${vehicle.vehicleType || 'Vehicle'}${
+          vehicle.registrationNo
+            ? ` (${vehicle.registrationNo})`
+            : ''
+        }.`
+      : ''
+  
+    const recipientMessage = Number.isInteger(count)
+      ? `${count} active ${
+          count === 1 ? 'recipient was' : 'recipients were'
+        } notified.`
+      : `Routed to ${recipient} for assignment.`
+  
+    pushToast(
+      `Shipment ${shipmentNumber} created for order ${order.id}.${vehicleMessage} ${recipientMessage}${
+        refreshSucceeded
+          ? ''
+          : ' Please refresh the page to reload current data.'
+      }`,
+      refreshSucceeded ? 'success' : 'error'
+    )
+  
     return shipment
-  }, [persist, pushToast])
+  }, [state.orders, refreshData, pushToast])
 
-  const assignShipment = useCallback((shipmentId, deliveryUser) => {
-    persist((s) => ({
-      ...s,
-      shipments: s.shipments.map((sh) => sh.id === shipmentId ? { ...sh, deliveryEmail: deliveryUser.email, deliveryName: deliveryUser.name, status: 'Assigned' } : sh),
-      notifications: [{ id: makeId('N'), target: 'delivery_partner', targetEmail: deliveryUser.email, message: `Shipment ${shipmentId} assigned to you.`, read: false, createdAt: new Date().toLocaleString() }, ...s.notifications],
-    }))
-    pushToast(`Shipment ${shipmentId} assigned to ${deliveryUser.name}.`)
-  }, [persist, pushToast])
+  const assignShipment = useCallback(async (shipmentId, deliveryUser) => {
+    const shipment = findByDisplayId(state.shipments, shipmentId)
+    if (!shipment) { pushToast(`Shipment ${shipmentId} was not found.`, 'error'); return false }
+    const user = typeof deliveryUser === 'string' ? state.users.find((item) => item.email === deliveryUser) : deliveryUser
+    if (!user) { pushToast('Choose a valid delivery partner.', 'error'); return false }
+    try {
+      const result = await apiRequest(`/shipments/${shipment.dbId}/assign`, { method: 'POST', body: JSON.stringify({ deliveryPartnerId: user.dbId || user.id }) })
+      await refreshData()
+      pushToast(`Shipment ${shipment.id} assigned to ${result.routing?.recipientName || user.name} (${result.routing?.recipientEmail || user.email}). A notification was sent to that Delivery Partner.`)
+      return true
+    } catch (error) { pushToast(`Could not assign shipment: ${error.message}`, 'error'); return false }
+  }, [state.shipments, state.users, refreshData, pushToast])
 
-  const updateShipment = useCallback((shipmentId, status) => {
-    persist((s) => ({
-      ...s,
-      shipments: s.shipments.map((sh) => sh.id === shipmentId ? { ...sh, status, proof: status === 'Delivered' ? true : sh.proof } : sh),
-      orders: s.orders.map((o) => {
-        const sh = s.shipments.find((x) => x.id === shipmentId)
-        if (!sh || o.id !== sh.orderId) return o
-        const orderStatus = status === 'Delivered' ? 'Delivered' : status === 'Out for delivery' ? 'Out for Delivery' : o.status
-        return { ...o, status: orderStatus }
-      }),
-    }))
-    pushToast(`${shipmentId} updated to ${status}.`)
-  }, [persist, pushToast])
+  const updateShipment = useCallback(async (shipmentId, status) => {
+    const shipment = findByDisplayId(state.shipments, shipmentId)
+    if (!shipment) { pushToast(`Shipment ${shipmentId} was not found.`, 'error'); return false }
+    const normalized = ({ 'Out for delivery': 'IN_TRANSIT', 'Out for Delivery': 'IN_TRANSIT', 'In transit': 'IN_TRANSIT', Delivered: 'DELIVERED', Closed: 'CLOSED', Assigned: 'ASSIGNED', Created: 'CREATED' })[status]
+    if (normalized === 'DELIVERED' && !shipment.proof) { pushToast('Record proof of delivery before marking this shipment delivered.', 'error'); return false }
+    if (!normalized) { pushToast(`Unsupported shipment status: ${status}`, 'error'); return false }
+    try {
+      await apiRequest(`/shipments/${shipment.dbId}/status`, { method: 'PATCH', body: JSON.stringify({ status: normalized }) })
+      await refreshData()
+      pushToast(`Shipment ${shipment.id} updated to ${status}. The customer was notified.`)
+      return true
+    } catch (error) { pushToast(`Could not update shipment: ${error.message}`, 'error'); return false }
+  }, [state.shipments, refreshData, pushToast])
 
-  const confirmReceipt = useCallback((orderId) => {
-    updateOrder(orderId, 'Closed')
-  }, [updateOrder])
+  const confirmReceipt = useCallback(async (orderId) => updateOrder(orderId, 'Closed'), [updateOrder])
 
-  const createRestock = useCallback((manufacturer, data) => {
-    const restock = { id: makeId('RST'), manufacturerEmail: manufacturer.email, manufacturer: manufacturer.name, ...data, status: 'Submitted', warehouse: 'Pune Central Warehouse', createdAt: new Date().toLocaleString() }
-    persist((s) => ({ ...s, restocks: [restock, ...s.restocks], notifications: [{ id: makeId('N'), target: 'warehouse_manager', message: `Restock ${restock.id} submitted by ${manufacturer.name}.`, read: false, createdAt: new Date().toLocaleString() }, ...s.notifications] }))
-    pushToast(`${restock.id} submitted for validation.`)
-    return restock
-  }, [persist, pushToast])
+  const createRestock = useCallback(async (manufacturer, data) => {
+    try {
+      const product = state.products.find((item) => item.code === data.sku)
+      const warehouse = state.warehouses.find((item) => item.active !== false) || state.warehouses[0]
+      if (!product) throw new Error(`SKU ${data.sku} was not found.`)
+      if (!warehouse) throw new Error('No active destination warehouse is available.')
+      const result = await apiRequest('/restocks', { method: 'POST', body: JSON.stringify({ destinationId: warehouse.dbId || warehouse.id, documentReference: data.docs || null, items: [{ skuId: product.dbId || product.id, quantity: Number(data.qty) }] }) })
+      await refreshData()
+      const count = result.routing?.recipientCount
+      pushToast(`Restock ${result.restockId} submitted to ${result.routing?.recipientRole || 'Warehouse Manager'} for validation${Number.isInteger(count) ? `; ${count} active recipient${count === 1 ? '' : 's'} notified` : ''}.`)
+      return mapRestock({ ...result, dealer: { fullName: manufacturer.name, email: manufacturer.email }, destination: warehouse, items: result.items?.length ? result.items : [{ sku: product, skuId: product.id, quantity: data.qty }] })
+    } catch (error) { pushToast(`Restock request failed: ${error.message}`, 'error'); return null }
+  }, [state.products, state.warehouses, refreshData, pushToast])
 
-  const receiveRestock = useCallback((restockId) => {
-    persist((s) => {
-      const restock = s.restocks.find((r) => r.id === restockId)
-      if (!restock) return s
-      const inventory = s.inventory.map((row) => row.sku === restock.sku ? { ...row, incoming: Math.max(0, row.incoming - Number(restock.qty)), available: row.available + Number(restock.qty) } : row)
-      return { ...s, inventory, restocks: s.restocks.map((r) => r.id === restockId ? { ...r, status: 'Received' } : r) }
-    })
-    pushToast(`${restockId} received and inventory updated.`)
-  }, [persist, pushToast])
+  const receiveRestock = useCallback(async (restockId) => {
+    const restock = findByDisplayId(state.restocks, restockId)
+    if (!restock) { pushToast(`Restock ${restockId} was not found.`, 'error'); return false }
+    try {
+      await apiRequest(`/restocks/${restock.dbId}/receive`, { method: 'POST', body: JSON.stringify({ accepted: restock.itemId ? { [restock.itemId]: restock.qty } : {} }) })
+      await refreshData()
+      pushToast(`Restock ${restock.id} received. Inventory was increased and low-stock alerts were recalculated.`)
+      return true
+    } catch (error) { pushToast(`Could not receive restock: ${error.message}`, 'error'); return false }
+  }, [state.restocks, refreshData, pushToast])
 
-  const createComplaint = useCallback((customer, data) => {
-    const complaint = { id: makeId('CMP'), customerEmail: customer.email, ...data, status: 'Open', createdAt: new Date().toLocaleString() }
-    persist((s) => ({ ...s, complaints: [complaint, ...s.complaints], notifications: [{ id: makeId('N'), target: 'admin', message: `New complaint ${complaint.id} was raised.`, read: false, createdAt: new Date().toLocaleString() }, ...s.notifications] }))
-    pushToast(`${complaint.id} created.`)
-    return complaint
-  }, [persist, pushToast])
+  const createComplaint = useCallback(async (customer, data) => {
+    try {
+      const order = findByDisplayId(state.orders, data.orderId)
+      const result = await apiRequest('/complaints', { method: 'POST', body: JSON.stringify({ complaintType: data.subject, description: data.description, orderId: order?.dbId || null, priority: data.priority || 'NORMAL' }) })
+      await refreshData()
+      const count = result.routing?.recipientCount
+      pushToast(`Complaint ${result.complaintId} registered and routed to ${result.routing?.recipientRole || 'Main Admin'}${Number.isInteger(count) ? ` (${count} active recipient${count === 1 ? '' : 's'} notified)` : ''}.`)
+      return mapComplaint({ ...result, customer: { fullName: customer.name, email: customer.email }, order: order ? { orderNumber: order.id } : null })
+    } catch (error) { pushToast(`Complaint request failed: ${error.message}`, 'error'); return null }
+  }, [state.orders, refreshData, pushToast])
 
-  const resolveComplaint = useCallback((id) => {
-    persist((s) => ({ ...s, complaints: s.complaints.map((c) => c.id === id ? { ...c, status: 'Resolved' } : c) }))
-    pushToast('Complaint resolved.')
-  }, [persist, pushToast])
+  const resolveComplaint = useCallback(async (id) => {
+    const complaint = findByDisplayId(state.complaints, id)
+    if (!complaint) { pushToast(`Complaint ${id} was not found.`, 'error'); return false }
+    try {
+      await apiRequest(`/complaints/${complaint.dbId}/status`, { method: 'PATCH', body: JSON.stringify({ status: 'RESOLVED' }) })
+      await refreshData()
+      pushToast(`Complaint ${complaint.id} resolved. The customer was notified.`)
+      return true
+    } catch (error) { pushToast(`Could not resolve complaint: ${error.message}`, 'error'); return false }
+  }, [state.complaints, refreshData, pushToast])
 
-  const assignTechnician = useCallback((complaintId, technicianEmail) => {
-    const tech = state.users.find((u) => u.email === technicianEmail)
-    persist((s) => ({
-      ...s,
-      complaints: s.complaints.map((c) => c.id === complaintId ? { ...c, status: 'Service Assigned', assignedTo: technicianEmail } : c),
-      serviceVisits: [{ id: makeId('SV'), complaintId, customerName: s.users.find((u) => u.email === s.complaints.find((c) => c.id === complaintId)?.customerEmail)?.name || 'Business Customer', technicianEmail, orderId: s.complaints.find((c) => c.id === complaintId)?.orderId || '', status: 'Assigned', assemblyRequired: true, defectFound: false, report: '' }, ...s.serviceVisits],
-      notifications: tech ? [{ id: makeId('N'), target: 'technician', targetEmail: technicianEmail, message: `A service visit has been assigned to you for complaint ${complaintId}.`, read: false, createdAt: new Date().toLocaleString() }, ...s.notifications] : s.notifications,
-    }))
-    pushToast(`Technician assigned for ${complaintId}.`)
-  }, [persist, pushToast, state.users])
+  const assignTechnician = useCallback(async (complaintId, technicianEmail) => {
+    const complaint = findByDisplayId(state.complaints, complaintId)
+    const technician = state.users.find((item) => item.email === technicianEmail || item.id === technicianEmail)
+    if (!complaint || !technician) { pushToast('Complaint or technician was not found.', 'error'); return false }
+    try {
+      const result = await apiRequest(`/complaints/${complaint.dbId}/assign-technician`, { method: 'POST', body: JSON.stringify({ technicianId: technician.dbId || technician.id }) })
+      await refreshData()
+      pushToast(`Service visit ${result.visitId} assigned to ${technician.name} (${technician.email}). The technician and customer were notified.`)
+      return true
+    } catch (error) { pushToast(`Could not assign technician: ${error.message}`, 'error'); return false }
+  }, [state.complaints, state.users, refreshData, pushToast])
 
-  const updateService = useCallback((visitId, patch) => {
-    persist((s) => ({ ...s, serviceVisits: s.serviceVisits.map((v) => v.id === visitId ? { ...v, ...patch } : v) }))
-    pushToast('Service visit updated.')
-  }, [persist, pushToast])
+  const updateService = useCallback(async (visitId, patch) => {
+    const visit = findByDisplayId(state.serviceVisits, visitId)
+    if (!visit) { pushToast(`Service visit ${visitId} was not found.`, 'error'); return false }
+    const statusMap = { Assigned: 'ASSIGNED', 'Visit Accepted': 'VISIT_ACCEPTED', Inspected: 'INSPECTED', 'Assembly Completed': 'ASSEMBLY_COMPLETED', 'Defect Found': 'DEFECT_FOUND', 'Repair Completed': 'REPAIR_COMPLETED', Completed: 'COMPLETED' }
+    try {
+      await apiRequest(`/service-visits/${visit.dbId}`, { method: 'PATCH', body: JSON.stringify({ ...(patch.status ? { status: statusMap[patch.status] || patch.status } : {}), ...(patch.assemblyRequired !== undefined ? { assemblyRequired: patch.assemblyRequired } : {}), ...(patch.defectFound !== undefined ? { defectFound: patch.defectFound } : {}), ...(patch.report !== undefined ? { notes: patch.report } : {}) }) })
+      await refreshData()
+      pushToast(`Service visit ${visit.id} updated and saved. The customer was notified.`)
+      return true
+    } catch (error) { pushToast(`Could not update service visit: ${error.message}`, 'error'); return false }
+  }, [state.serviceVisits, refreshData, pushToast])
 
-  const markNotificationRead = useCallback((id) => {
-    persist((s) => ({ ...s, notifications: s.notifications.map((n) => n.id === id ? { ...n, read: true } : n) }))
-  }, [persist])
+  const createTransfer = useCallback(async (data) => {
+    try {
+      const result = await apiRequest('/transfers', { method: 'POST', body: JSON.stringify(data) })
+      await refreshData()
+      const count = result.routing?.recipientCount
+      pushToast(`Transfer ${result.transferId} requested.${Number.isInteger(count) ? ` ${count} warehouse manager${count === 1 ? '' : 's'} notified.` : ''}`)
+      return true
+    } catch (error) {
+      pushToast(`Could not create transfer: ${error.message}`, 'error')
+      return false
+    }
+  }, [refreshData, pushToast])
+
+  const dispatchTransfer = useCallback(async (transferId) => {
+    const transfer = (state.transfers || []).find((item) => item.id === transferId || item.dbId === transferId)
+    if (!transfer) { pushToast('Transfer not found.', 'error'); return false }
+    try {
+      await apiRequest(`/transfers/${transfer.dbId || transfer.id}/dispatch`, { method: 'PATCH' })
+      await refreshData()
+      pushToast(`Transfer ${transfer.id} dispatched. Source stock has been deducted and destination incoming stock updated.`)
+      return true
+    } catch (error) {
+      pushToast(`Could not dispatch transfer: ${error.message}`, 'error')
+      return false
+    }
+  }, [state.transfers, refreshData, pushToast])
+
+  const receiveTransfer = useCallback(async (transferId) => {
+    const transfer = (state.transfers || []).find((item) => item.id === transferId || item.dbId === transferId)
+    if (!transfer) { pushToast('Transfer not found.', 'error'); return false }
+    try {
+      await apiRequest(`/transfers/${transfer.dbId || transfer.id}/receive`, { method: 'PATCH' })
+      await refreshData()
+      pushToast(`Transfer ${transfer.id} received. Destination stock has been reconciled.`)
+      return true
+    } catch (error) {
+      pushToast(`Could not receive transfer: ${error.message}`, 'error')
+      return false
+    }
+  }, [state.transfers, refreshData, pushToast])
+
+  const createVehicle = useCallback(async (data) => {
+    try {
+      const result = await apiRequest('/fleet/vehicles', { method: 'POST', body: JSON.stringify(data) })
+      await refreshData()
+      pushToast(`Vehicle ${result.registrationNo} added to the fleet.`)
+      return true
+    } catch (error) {
+      pushToast(`Could not add vehicle: ${error.message}`, 'error')
+      return false
+    }
+  }, [refreshData, pushToast])
+
+  const updateVehicleStatus = useCallback(async (vehicleId, status) => {
+    const vehicle = (state.vehicles || []).find((item) => item.id === vehicleId || item.dbId === vehicleId)
+    if (!vehicle) { pushToast('Vehicle not found in the current fleet.', 'error'); return false }
+    try {
+      await apiRequest(`/fleet/vehicles/${vehicle.dbId || vehicle.id}/status`, { method: 'PATCH', body: JSON.stringify({ status }) })
+      await refreshData()
+      pushToast(`${vehicle.registrationNo} status updated.`)
+      return true
+    } catch (error) {
+      pushToast(`Could not update vehicle status: ${error.message}`, 'error')
+      return false
+    }
+  }, [state.vehicles, refreshData, pushToast])
+
+  const createReturn = useCallback(async (data) => {
+    const order = findByDisplayId(state.orders, data.orderId)
+    if (!order) { pushToast('Choose an order that belongs to your account.', 'error'); return false }
+    if (!['Delivered', 'Closed'].includes(order.status)) { pushToast('A return can only be requested after delivery.', 'error'); return false }
+    try {
+      const result = await apiRequest('/returns', { method: 'POST', body: JSON.stringify({ orderId: order.dbId, skuId: data.skuId || null, reason: String(data.reason || '').trim() }) })
+      await refreshData()
+      const count = result.routing?.recipientCount
+      pushToast(`Return ${result.returnId} submitted.${Number.isInteger(count) ? ` ${count} administrator${count === 1 ? '' : 's'} notified.` : ''}`)
+      return true
+    } catch (error) {
+      pushToast(`Could not submit return: ${error.message}`, 'error')
+      return false
+    }
+  }, [state.orders, refreshData, pushToast])
+
+  const updateReturnStatus = useCallback(async (returnId, status) => {
+    const item = (state.returns || []).find((row) => row.id === returnId || row.dbId === returnId)
+    if (!item) { pushToast('Return request not found.', 'error'); return false }
+    const apiStatus = ({ Open: 'REQUESTED', Approved: 'APPROVED', Rejected: 'REJECTED', Received: 'RECEIVED', Closed: 'COMPLETED' })[status] || status
+    try {
+      await apiRequest(`/returns/${item.dbId || item.id}/status`, { method: 'PATCH', body: JSON.stringify({ status: apiStatus }) })
+      await refreshData()
+      pushToast(`Return ${item.id} updated to ${status}.`)
+      return true
+    } catch (error) {
+      pushToast(`Could not update return: ${error.message}`, 'error')
+      return false
+    }
+  }, [state.returns, refreshData, pushToast])
+
+  const recordProofOfDelivery = useCallback(async (shipmentId, details = {}) => {
+    const shipment = findByDisplayId(state.shipments, shipmentId)
+    if (!shipment) { pushToast('Shipment not found.', 'error'); return false }
+    if (!String(details.reference || details.notes || '').trim()) {
+      pushToast('Enter a proof reference or delivery note before submitting.', 'error')
+      return false
+    }
+    try {
+      await apiRequest(`/shipments/${shipment.dbId}/proof`, { method: 'POST', body: JSON.stringify({ podType: details.podType || 'REFERENCE', reference: String(details.reference || '').trim() || null, notes: String(details.notes || '').trim() || null }) })
+      await refreshData()
+      pushToast(`Proof of delivery recorded for ${shipment.id}.`)
+      return true
+    } catch (error) {
+      pushToast(`Could not record proof of delivery: ${error.message}`, 'error')
+      return false
+    }
+  }, [state.shipments, refreshData, pushToast])
+
+  const markNotificationRead = useCallback(async (id) => {
+    const notification = findByDisplayId(state.notifications, id)
+    if (!notification) return false
+    try {
+      await apiRequest(`/notifications/${notification.dbId}/read`, { method: 'PATCH' })
+      setState((current) => ({ ...current, notifications: current.notifications.map((item) => item.id === notification.id ? { ...item, read: true } : item) }))
+      return true
+    } catch (error) { pushToast(`Could not mark notification as read: ${error.message}`, 'error'); return false }
+  }, [state.notifications, pushToast])
 
   const value = useMemo(() => ({
-    ...state,
-    session,
-    setSession: setSessionState,
-    login,
-    logout,
-    createUser,
-    updateUser,
-    toggleUser,
-    createProduct,
-    updateProduct,
-    toggleProduct,
-    adjustInventory,
-    createOrder,
-    updateOrder,
-    reserveStock,
-    pickPackOrder,
-    createShipment,
-    assignShipment,
-    updateShipment,
-    confirmReceipt,
-    createRestock,
-    receiveRestock,
-    createComplaint,
-    resolveComplaint,
-    assignTechnician,
-    updateService,
-    markNotificationRead,
-    pushToast,
-    toast,
-  }), [state, session, login, logout, createUser, updateUser, toggleUser, createProduct, updateProduct, toggleProduct, adjustInventory, createOrder, updateOrder, reserveStock, pickPackOrder, createShipment, assignShipment, updateShipment, confirmReceipt, createRestock, receiveRestock, createComplaint, resolveComplaint, assignTechnician, updateService, markNotificationRead, pushToast, toast])
+    ...state, session, authLoading, dataLoading, refreshData, setSession: setSessionState,
+    login, logout, createUser, updateUser, toggleUser,
+    createProduct, updateProduct, toggleProduct, adjustInventory,
+    createOrder, updateOrder, reserveStock, pickPackOrder, createShipment,
+    assignShipment, updateShipment, confirmReceipt,
+    createRestock, receiveRestock, createComplaint, resolveComplaint,
+    assignTechnician, updateService, markNotificationRead, createVehicle, updateVehicleStatus, createReturn, updateReturnStatus, recordProofOfDelivery, createTransfer, dispatchTransfer, receiveTransfer, pushToast, toast,
+  }), [state, session, authLoading, dataLoading, refreshData, login, logout, createUser, updateUser, toggleUser, createProduct, updateProduct, toggleProduct, adjustInventory, createOrder, updateOrder, reserveStock, pickPackOrder, createShipment, assignShipment, updateShipment, confirmReceipt, createRestock, receiveRestock, createComplaint, resolveComplaint, assignTechnician, updateService, markNotificationRead, createVehicle, updateVehicleStatus, createReturn, updateReturnStatus, recordProofOfDelivery, createTransfer, dispatchTransfer, receiveTransfer, pushToast, toast])
 
   return <WarexContext.Provider value={value}>{children}</WarexContext.Provider>
 }

@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom'
-import { X } from 'lucide-react'
+import { X, Boxes } from 'lucide-react'
 import { NAV_BY_ROLE } from '../../lib/nav'
 import { getRole } from '../../lib/roles'
 
@@ -47,7 +47,7 @@ export default function Sidebar({ roleId, mobileOpen, onClose }) {
         style={{ background: 'var(--ink)', borderRight: '1px solid var(--ink-line)' }}
       >
         <div className="px-5 py-5 flex items-baseline gap-2" style={{ borderBottom: '1px solid var(--ink-line)' }}>
-          <span className="text-lg font-bold tracking-tight" style={{ color: '#fff' }}>WAREX</span>
+          <span className="sidebar-brand-mark"><Boxes size={16} /></span><span className="text-lg font-bold tracking-tight" style={{ color: '#fff' }}>WAREX</span>
           <span className="text-[10px] font-mono-data" style={{ color: 'var(--accent)' }}>v1.0</span>
         </div>
         <SidebarContent roleId={roleId} />
@@ -66,7 +66,7 @@ export default function Sidebar({ roleId, mobileOpen, onClose }) {
               style={{ borderBottom: '1px solid var(--ink-line)' }}
             >
               <div className="flex items-baseline gap-2">
-                <span className="text-lg font-bold tracking-tight" style={{ color: '#fff' }}>WAREX</span>
+                <span className="sidebar-brand-mark"><Boxes size={16} /></span><span className="text-lg font-bold tracking-tight" style={{ color: '#fff' }}>WAREX</span>
                 <span className="text-[10px] font-mono-data" style={{ color: 'var(--accent)' }}>v1.0</span>
               </div>
               <button onClick={onClose} aria-label="Close menu" style={{ color: 'var(--ink-muted)' }}>

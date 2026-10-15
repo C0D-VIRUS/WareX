@@ -50,9 +50,9 @@ export default function AppShell({ session }) {
       <Sidebar roleId={session.roleId} mobileOpen={mobileOpen} onClose={() => setMobileOpen(false)} />
       <div className="flex-1 min-w-0 flex flex-col">
         <Topbar session={session} onMenuClick={() => setMobileOpen(true)} />
-        <main className="flex-1 p-4 md:p-6">
+        <main className="app-main flex-1 p-4 md:p-6">
           <Routes>
-            <Route index element={<Overview session={session} />} />
+            <Route index element={session.roleId === 'delivery_partner' ? <TodayRun session={session} /> : <Overview session={session} />} />
             {nonIndexItems.map((item) => {
               const Component = overrides[item.path]
               return <Route key={item.path} path={item.path} element={Component ? <Component session={session} /> : <StubPage title={item.label} />} />

@@ -22,3 +22,8 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# WAREX backend secrets and generated files
+server/.env
+server/node_modules/
+server/uploads/
